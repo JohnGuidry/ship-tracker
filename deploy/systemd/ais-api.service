@@ -1,0 +1,16 @@
+[Unit]
+Description=AIS HTTP API (vessel positions JSON)
+After=ais-listener.service
+Requires=ais-listener.service
+
+[Service]
+Type=simple
+User=john
+ExecStart=/usr/bin/python3 /home/john/rtl-ais/ais_api.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

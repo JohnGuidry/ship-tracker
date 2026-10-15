@@ -1,0 +1,3 @@
+[submodule "rf/rtl-ais"]
+	path = rf/rtl-ais
+	url = https://github.com/JohnGuidry/rtl-ais.git

@@ -1,0 +1,5 @@
+# Copy this file to `.carto-key` (which is gitignored) and put your real
+# CARTO basemaps API key on a single line. deploy/deploy-dashboard.sh reads it
+# at deploy time and injects it into the __CARTO_KEY__ placeholder in web/*.html.
+# The real key must NEVER be committed.
+PASTE_YOUR_CARTO_BASEMAPS_KEY_HERE

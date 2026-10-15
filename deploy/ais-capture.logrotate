@@ -1,0 +1,9 @@
+/home/john/ais_capture.log {
+    size 10M
+    rotate 500
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

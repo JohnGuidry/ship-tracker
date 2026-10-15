@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIS Heatmap — Signal Density</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+#map { width: 100%; height: calc(100vh - 48px); }
+#header {
+  height: 48px; background: #111; display: flex; align-items: center;
+  padding: 0 16px; gap: 16px; border-bottom: 1px solid #222;
+}
+#header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+#status { font-size: 13px; color: #888; }
+#status.live { color: #4caf50; }
+#count { font-size: 13px; color: #666; margin-left: auto; }
+#controls {
+  display: flex; gap: 4px; align-items: center;
+}
+#controls button {
+  background: #1a1a1a; color: #888; border: 1px solid #333; border-radius: 4px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+#controls button:hover { color: #ccc; border-color: #555; }
+#controls button.active { background: #1e3a5f; color: #4fc3f7; border-color: #4fc3f7; }
+#timer { font-size: 12px; color: #555; min-width: 60px; }
+.back-link {
+  color: #4fc3f7; text-decoration: none; font-size: 13px;
+}
+.back-link:hover { text-decoration: underline; }
+.leaflet-tile-pane { filter: saturate(0.3) brightness(0.6); }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>&#x1F525; AIS Heatmap</h1>
+  <a href="/ais/" class="back-link">&#x26F5; Live Tracker</a>
+  <span id="status">Loading...</span>
+  <span id="count"></span>
+  <div id="controls">
+    <button data-hours="6" onclick="setRange(6)">6h</button>
+    <button data-hours="24" class="active" onclick="setRange(24)">24h</button>
+    <button data-hours="48" onclick="setRange(48)">48h</button>
+    <button data-hours="168" onclick="setRange(168)">7d</button>
+    <button data-hours="0" onclick="setRange(0)">All</button>
+  </div>
+  <span id="timer"></span>
+</div>
+<div id="map"></div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script>
+const API = '/ais/api/heatmap';
+const POLL_MS = 15 * 60 * 1000; // 15 minutes
+let currentHours = 24;
+let heatLayer = null;
+let pollTimer = null;
+let countdown = POLL_MS / 1000;
+
+const map = L.map('map', { zoomControl: true }).setView([48.11, -122.76], 12);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=__CARTO_KEY__', {
+  attribution: '&copy; OSM &copy; CARTO', maxZoom: 19,
+}).addTo(map);
+
+function setRange(hours) {
+  currentHours = hours;
+  document.querySelectorAll('#controls button').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.hours) === hours);
+  });
+  countdown = POLL_MS / 1000;
+  loadHeatmap();
+}
+
+function loadHeatmap() {
+  const url = currentHours > 0
+    ? `${API}?hours=${currentHours}`
+    : `${API}?hours=0`;
+
+  fetch(url)
+    .then(res => {
+      if (!res.ok) throw new Error(res.status);
+      return res.json();
+    })
+    .then(data => {
+      const points = data.points.map(p => [p[0], p[1], p[2]]);
+
+      if (heatLayer) map.removeLayer(heatLayer);
+
+      if (points.length === 0) {
+        document.getElementById('status').textContent = 'No data';
+        document.getElementById('status').className = '';
+        document.getElementById('count').textContent = '';
+        return;
+      }
+
+      // Normalize weights to 0-1 range for leaflet.heat intensity
+      const maxWeight = Math.max(...points.map(p => p[2]));
+      const normalized = points.map(p => [p[0], p[1], p[2] / maxWeight]);
+
+      heatLayer = L.heatLayer(normalized, {
+        radius: 25,
+        blur: 18,
+        maxZoom: 17,
+        minOpacity: 0.3,
+        gradient: {
+          0.0: '#000033',
+          0.2: '#0000ff',
+          0.4: '#00ffff',
+          0.6: '#00ff00',
+          0.8: '#ffff00',
+          1.0: '#ff0000',
+        },
+      }).addTo(map);
+
+      document.getElementById('status').textContent = 'LIVE';
+      document.getElementById('status').className = 'live';
+      const hoursLabel = currentHours === 0 ? 'all time' : `${currentHours}h`;
+      document.getElementById('count').textContent =
+        `${data.point_count} grid cells · ${hoursLabel}`;
+
+      // Fit bounds on first load
+      if (!map._loaded) {
+        const bounds = L.latLngBounds(points.map(p => [p[0], p[1]]));
+        map.fitBounds(bounds, { padding: [40, 40] });
+        map._loaded = true;
+      }
+    })
+    .catch(err => {
+      document.getElementById('status').textContent = 'Disconnected';
+      document.getElementById('status').className = '';
+    });
+}
+
+function tick() {
+  countdown--;
+  if (countdown <= 0) {
+    loadHeatmap();
+    countdown = POLL_MS / 1000;
+  }
+  const mins = Math.floor(countdown / 60);
+  const secs = countdown % 60;
+  document.getElementById('timer').textContent = `next: ${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+loadHeatmap();
+pollTimer = setInterval(tick, 1000);
+</script>
+</body>
+</html>

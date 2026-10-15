@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIS Live — Ship Tracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+#map { width: 100%; height: calc(100vh - 48px); }
+#header {
+  height: 48px; background: #111; display: flex; align-items: center;
+  padding: 0 16px; gap: 16px; border-bottom: 1px solid #222;
+}
+#header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+#status { font-size: 13px; color: #888; }
+#status.live { color: #4caf50; }
+#count { font-size: 13px; color: #666; margin-left: auto; }
+#panel {
+  position: absolute; top: 60px; right: 12px; z-index: 1000;
+  background: #161616; border: 1px solid #333; border-radius: 8px;
+  width: 320px; max-height: calc(100vh - 80px); overflow-y: auto;
+  font-size: 13px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+#panel-header {
+  padding: 10px 14px; border-bottom: 1px solid #222;
+  display: flex; align-items: center; justify-content: space-between;
+}
+#panel-header h2 { font-size: 14px; font-weight: 600; }
+#panel-toggle { cursor: pointer; color: #666; font-size: 18px; background: none; border: none; }
+.vessel-card {
+  padding: 10px 14px; border-bottom: 1px solid #1e1e1e; cursor: pointer;
+  transition: background 0.15s;
+}
+.vessel-card:hover { background: #1e1e1e; }
+.vessel-card .name { font-weight: 600; color: #fff; margin-bottom: 2px; }
+.vessel-card .mmsi { color: #666; font-size: 11px; }
+.vessel-card .details { color: #999; font-size: 12px; margin-top: 4px; }
+.vessel-card .pos { color: #5a9; font-size: 11px; font-family: monospace; }
+.vessel-card.nopos { opacity: 0.55; }
+.vessel-card.nopos:hover { opacity: 0.8; }
+.nopos-tag { color: #888; font-size: 11px; margin-top: 4px; }
+.leaflet-tile-pane { filter: saturate(0.3) brightness(0.6); }
+.leaflet-popup-content-wrapper { background: #1a1a1a; color: #e0e0e0; }
+.leaflet-popup-tip { background: #1a1a1a; }
+.leaflet-popup-content { font-size: 13px; line-height: 1.5; }
+.leaflet-popup-content strong { color: #fff; }
+
+#panel { transition: transform 0.25s ease, opacity 0.2s ease; }
+#panel.collapsed { transform: translateX(calc(100% + 16px)); opacity: 0; pointer-events: none; }
+#panel-open-btn {
+  position: absolute; top: 60px; right: 12px; z-index: 1000;
+  background: #161616; border: 1px solid #333; border-radius: 8px;
+  width: 40px; height: 40px; cursor: pointer;
+  display: none; align-items: center; justify-content: center;
+  color: #4caf50; font-size: 20px; font-weight: bold;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+#panel-open-btn.visible { display: flex; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>&#x26F5; AIS Live</h1>
+  <a href="/ais/heatmap.html" style="color:#4fc3f7;text-decoration:none;font-size:13px">&#x1F525; Heatmap</a>
+  <span id="status">Connecting...</span>
+  <span id="count"></span>
+</div>
+<div id="map"></div>
+<div id="panel">
+  <div id="panel-header">
+    <h2>Vessels</h2>
+    <button id="panel-toggle" onclick="togglePanel()">&#x2212;</button>
+  </div>
+  <div id="vessel-list"></div>
+</div>
+<button id="panel-open-btn" onclick="togglePanel()">&#x2630;</button>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API = '/ais/api/vessels';
+const POLL_MS = 5000;
+const MAX_TRAIL = 60; // max trail points per vessel
+const TRAIL_FADE_MS = 5 * 60 * 1000; // trail fades over 5 minutes
+const MAX_VESSEL_AGE_MS = 30 * 60 * 1000; // vessels disappear after 30 min stale
+
+const map = L.map('map', { zoomControl: true }).setView([48.11, -122.76], 12);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=__CARTO_KEY__', {
+  attribution: '&copy; OSM &copy; CARTO', maxZoom: 19,
+}).addTo(map);
+
+// Per-vessel state: { marker, trail[], trailLine }
+const vesselState = {};
+
+function makeVesselIcon(heading, color) {
+  const h = heading != null && heading < 360 ? heading : 0;
+  return L.divIcon({
+    className: '',
+    html: `<div style="
+      width:0; height:0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-bottom: 20px solid ${color};
+      transform: rotate(${h}deg);
+      transform-origin: center 70%;
+      filter: drop-shadow(0 0 3px ${color});
+    "></div>`,
+    iconSize: [20, 24],
+    iconAnchor: [10, 14],
+  });
+}
+
+const COLORS = ['#00e5ff', '#76ff03', '#ff9100', '#e040fb', '#ffea00', '#ff1744', '#00e676', '#d500f9'];
+function vesselColor(mmsi) {
+  return COLORS[String(mmsi).split('').reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length];
+}
+
+let panelOpen = window.innerWidth >= 768;
+function togglePanel() {
+  panelOpen = !panelOpen;
+  const panel = document.getElementById('panel');
+  const openBtn = document.getElementById('panel-open-btn');
+  if (panelOpen) {
+    panel.classList.remove('collapsed');
+    openBtn.classList.remove('visible');
+  } else {
+    panel.classList.add('collapsed');
+    openBtn.classList.add('visible');
+  }
+}
+// Start collapsed on mobile
+if (!panelOpen) {
+  document.getElementById('panel').classList.add('collapsed');
+  document.getElementById('panel-open-btn').classList.add('visible');
+}
+
+function updateVessels(data) {
+  const seen = new Set();
+  const list = document.getElementById('vessel-list');
+  list.innerHTML = '';
+  const now = Date.now();
+
+  // Filter out stale vessels that havent reported recently
+  data.vessels = data.vessels.filter(v => {
+    const ts = v.last_pos || v.last_static;
+    if (!ts) return false;
+    const age = now - new Date(ts).getTime();
+    return age < MAX_VESSEL_AGE_MS;
+  });
+  data.count = data.vessels.length;
+
+  data.vessels.forEach(v => {
+    const id = v.mmsi;
+    seen.add(id);
+    const name = v.name || `MMSI ${id}`;
+    const type = v.ship_type || '';
+    const color = vesselColor(id);
+    const hasPos = v.lat != null && v.lon != null && (v.lat !== 0 || v.lon !== 0);
+
+    if (!vesselState[id]) vesselState[id] = { trail: [] };
+    const st = vesselState[id];
+
+    if (hasPos) {
+      const pos = [v.lat, v.lon];
+      const heading = (v.heading != null && v.heading < 360) ? v.heading : v.course;
+
+      // Update or create marker
+      if (st.marker) {
+        st.marker.setLatLng(pos);
+        st.marker.setIcon(makeVesselIcon(heading, color));
+      } else {
+        st.marker = L.marker(pos, { icon: makeVesselIcon(heading, color) }).addTo(map);
+        st.marker.bindPopup('', { className: 'vessel-popup' });
+      }
+
+      // Add to trail
+      const last = st.trail.length > 0 ? st.trail[st.trail.length - 1] : null;
+      if (!last || last[0] !== v.lat || last[1] !== v.lon) {
+        st.trail.push([v.lat, v.lon, now]);
+        if (st.trail.length > MAX_TRAIL) st.trail.shift();
+      }
+
+      // Rebuild trail polyline with fade
+      if (st.trailLine) map.removeLayer(st.trailLine);
+      if (st.trail.length >= 2) {
+        const pts = st.trail.filter(p => now - p[2] < TRAIL_FADE_MS);
+        if (pts.length >= 2) {
+          // Build multi-segment line with fading opacity
+          const coords = pts.map(p => [p[0], p[1]]);
+          const segments = [];
+          for (let i = 1; i < pts.length; i++) {
+            const age = (now - pts[i][2]) / TRAIL_FADE_MS;
+            const opacity = Math.max(0.05, 1 - age);
+            segments.push({
+              coords: [coords[i-1], coords[i]],
+              opacity: opacity
+            });
+          }
+          // Use a single polyline with gradient via SVG — simpler: just opacity based on newest
+          const age0 = (now - pts[0][2]) / TRAIL_FADE_MS;
+          st.trailLine = L.polyline(coords, {
+            color: color,
+            weight: 2,
+            opacity: Math.max(0.15, 1 - age0),
+            dashArray: null,
+          }).addTo(map);
+        }
+      }
+
+      // Popup
+      const popup = `<strong>${name}</strong><br>` +
+        `${type ? type + '<br>' : ''}` +
+        `MMSI: ${id}<br>` +
+        `${v.nav_status || ''}<br>` +
+        `Speed: ${v.speed ?? '?'} kn &nbsp; Course: ${v.course ?? '?'}&deg;<br>` +
+        `Heading: ${v.heading ?? '?'}&deg;<br>` +
+        `<span style="font-family:monospace;font-size:11px;color:#5a9">${v.lat?.toFixed(5)}, ${v.lon?.toFixed(5)}</span>`;
+      st.marker.setPopupContent(popup);
+    }
+
+    // Panel card
+    const card = document.createElement('div');
+    card.className = 'vessel-card' + (hasPos ? '' : ' nopos');
+    const arrow = hasPos && v.course != null ? `<span style="display:inline-block;transform:rotate(${v.heading ?? v.course}deg);color:${color}">&#x25B2;</span> ` : '';
+    card.innerHTML = `
+      <div class="name">${arrow}${name}${type ? ' <span style="color:#666">(' + type + ')</span>' : ''}</div>
+      <div class="mmsi">MMSI ${id}${v.channel ? ' &middot; Ch ' + v.channel : ''}</div>
+      ${hasPos ? `<div class="details">${v.nav_status || ''} &middot; ${v.speed ?? '?'} kn &middot; ${v.course ?? '?'}&deg;</div>
+      <div class="pos">${v.lat?.toFixed(5)}, ${v.lon?.toFixed(5)}</div>` : '<div class="nopos-tag">&#x1F4E1; no position</div>'}
+      ${v.dest ? `<div class="details">Dest: ${v.dest}</div>` : ''}
+    `;
+    if (hasPos) {
+      card.onclick = () => { map.setView([v.lat, v.lon], 14); vesselState[id].marker.openPopup(); };
+    }
+    list.appendChild(card);
+  });
+
+  // Remove stale vessels
+  Object.keys(vesselState).forEach(id => {
+    if (!seen.has(Number(id))) {
+      const st = vesselState[id];
+      if (st.marker) map.removeLayer(st.marker);
+      if (st.trailLine) map.removeLayer(st.trailLine);
+      delete vesselState[id];
+    }
+  });
+}
+
+let firstLoad = true;
+async function poll() {
+  try {
+    const res = await fetch(API);
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    document.getElementById('status').textContent = 'LIVE';
+    document.getElementById('status').className = 'live';
+    updateVessels(data);
+    document.getElementById('count').textContent = `${data.count} vessel${data.count !== 1 ? 's' : ''}`;
+    if (firstLoad && data.vessels.length > 0) {
+      const bounds = data.vessels
+        .filter(v => v.lat && v.lon && (v.lat !== 0 || v.lon !== 0))
+        .map(v => [v.lat, v.lon]);
+      if (bounds.length > 0) map.fitBounds(bounds, { padding: [40, 40] });
+      firstLoad = false;
+    }
+  } catch (e) {
+    document.getElementById('status').textContent = 'Disconnected';
+    document.getElementById('status').className = '';
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

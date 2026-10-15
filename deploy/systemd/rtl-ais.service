@@ -1,0 +1,14 @@
+[Unit]
+Description=RTL-SDR AIS decoder (NMEA to UDP 10110)
+After=ais-listener.service
+Requires=ais-listener.service
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/ais-usb-reset.sh
+ExecStart=/usr/local/bin/rtl_ais -n -p -5
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+[Install]
+WantedBy=multi-user.target

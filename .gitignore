@@ -1,0 +1,27 @@
+# ── Secrets — NEVER commit ─────────────────────────────────────────────
+.carto-key
+*.key
+*.pem
+*.crt
+.env
+.env.*
+secrets/
+
+# ── Runtime data / artifacts ───────────────────────────────────────────
+*.db
+*.db-wal
+*.db-shm
+ais_capture.log*
+*.log
+
+# ── Build / deps ───────────────────────────────────────────────────────
+node_modules/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# ── OS / editor ────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*~
